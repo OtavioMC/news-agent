@@ -1,0 +1,31 @@
+{
+  "name": "news-article-agent",
+  "version": "1.0.0",
+  "description": "A full-stack JavaScript application that implements a Retrieval-Augmented Generation (RAG) system for news article querying and summarization.",
+  "main": "index.js",
+"scripts": {
+  "start": "ts-node src/api/server.ts",
+  "build": "tsc",
+  "serve": "node dist/api/server.js"
+},
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/express": "^5.0.1",
+    "@types/node": "^22.13.14",
+    "express": "^4.21.2",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.8.2"
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.24.0",
+    "@pinecone-database/pinecone": "^5.1.1",
+    "cheerio": "^1.0.0",
+    "dotenv": "^16.4.7",
+    "kafkajs": "^2.2.4",
+    "langfuse": "^3.37.0",
+    "pinecone-client": "^2.0.0",
+    "zod": "^3.24.2"
+  }
+}

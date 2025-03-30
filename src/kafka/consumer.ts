@@ -1,6 +1,7 @@
-import { Kafka } from 'kafkajs';
-import { searchArticles } from '../services/articleProcessor';
+import { Kafka, KafkaJSError } from 'kafkajs';
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import cheerio from 'cheerio';
+import { Pinecone } from '@pinecone-database/pinecone';
 
 const kafka = new Kafka({
   clientId: 'news-agent-consumer',
@@ -14,6 +15,14 @@ const kafka = new Kafka({
 });
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
+const pinecone = new Pinecone({ apiKey: process.env.PINECONE_API_KEY! });
+
+interface Article {
+  title: string;
+  content: string;
+  url: string;
+  date: string;
+}
 
 export async function startConsumer() {
   const consumer = kafka.consumer({
@@ -23,59 +32,93 @@ export async function startConsumer() {
   try {
     console.log('Connecting Kafka consumer...');
     await consumer.connect();
-    console.log('Subscribed to topic:', process.env.KAFKA_TOPIC_NAME!);
-    await consumer.subscribe({
+    await consumer.subscribe({ 
       topic: process.env.KAFKA_TOPIC_NAME!,
-      fromBeginning: false
+      fromBeginning: false 
     });
 
+    console.log(`Listening for article URLs on topic: ${process.env.KAFKA_TOPIC_NAME}`);
+
     await consumer.run({
-      eachMessage: async ({ topic, partition, message }) => {
-        const query = message.value?.toString();
-        if (!query) {
-          console.warn('Message without a valid query:', message);
+      eachMessage: async ({ partition, message }) => {
+        const url = message.value?.toString();
+        if (!url || !url.startsWith('http')) {
+          console.warn(`Invalid URL in message [Partition ${partition}]`);
           return;
         }
 
-        console.log(`Processing query [Partition ${partition}]: ${query}`);
+        console.log(`Processing article URL [Partition ${partition}]: ${url}`);
 
         try {
-          // Perform RAG using Gemini
-          const relevantArticles = await searchArticles(query);
-          const context = relevantArticles.map(a =>
-            `Title: ${a.title}\nContent: ${a.content.substring(0, 1000)}`
-          ).join('\n\n');
+          // 1. Extract HTML content
+          const html = await fetch(url).then(res => res.text());
+          if (!html) throw new Error('Failed to fetch HTML content');
+          
+          // 2. Basic content extraction with Cheerio
+          const $ = cheerio.load(html);
+          const rawTitle = $('h1').first().text().trim() || $('title').text().trim();
+          const rawContent = $('body').text().replace(/\s+/g, ' ').trim();
 
-          const model = genAI.getGenerativeModel({ model: "gemini-1.5-pro" });
-          const { response } = await model.generateContent({
-            contents: [{
+          // 3. Clean and structure with Gemini
+          const model = genAI.getGenerativeModel({ model: "gemini-2.5-pro-exp-03-25" });
+          const prompt = `
+            Transform this raw article content into structured JSON:
+            URL: ${url}
+            Raw Title: ${rawTitle.substring(0, 200)}
+            Raw Content: ${rawContent.substring(0, 10000)}
+
+            Output MUST be valid JSON in this exact format:
+            {
+              "title": "Cleaned article title",
+              "content": "Cleaned and concise article content",
+              "url": "${url}",
+              "date": "YYYY-MM-DD" (use current date if not available)
+            }`;
+
+          const { response } = await model.generateContent(prompt);
+          const text = response.text();
+          const jsonStart = text.indexOf('{');
+          const jsonEnd = text.lastIndexOf('}') + 1;
+          const article: Article = JSON.parse(text.slice(jsonStart, jsonEnd));
+
+          // 4. Store in Pinecone
+          const embeddingModel = genAI.getGenerativeModel({ model: "gemini-embedding-exp-03-07" });
+          const { embedding } = await embeddingModel.embedContent({
+            content: { 
               role: "user",
-              parts: [{
-                text: `Answer this query: ${query}\n\nContext:\n${context}\n\nBe concise and cite sources.`
-              }]
-            }]
+              parts: [{ text: `${article.title}\n${article.content.substring(0, 1000)}` }]
+            }
           });
 
-          console.log('Generated response:', response.text());
-          console.log('Sources:', relevantArticles.map(a => ({
-            title: a.title,
-            url: a.url,
-            date: a.date
-          })));
-        } catch (error) {
-          console.error(`Failed to process query ${query}:`, error);
+          await pinecone.Index(process.env.PINECONE_INDEX_NAME!).upsert([{
+            id: Buffer.from(url).toString('base64').slice(0, 64),
+            values: embedding.values,
+            metadata: article
+          }]);
+
+          console.log('Successfully processed article:', {
+            title: article.title,
+            url: article.url,
+            date: article.date,
+            contentLength: article.content.length
+          });
+
+        } catch (error: unknown) {
+          console.error(`Failed to process article ${url}:`, 
+            error instanceof Error ? error.message : error);
         }
       },
     });
 
     process.on('SIGINT', async () => {
-      console.log('Shutting down consumer...');
       await consumer.disconnect();
+      console.log('Consumer disconnected');
       process.exit(0);
     });
 
-  } catch (error) {
-    console.error('Kafka consumer error:', error);
+  } catch (error: unknown) {
+    console.error('Consumer initialization failed:',
+      error instanceof Error ? error.message : 'Unknown error');
     process.exit(1);
   }
 }

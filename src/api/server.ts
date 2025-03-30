@@ -1,4 +1,3 @@
-// src/api/server.ts
 import express, { Express, Request, Response, NextFunction } from 'express';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { Pinecone } from '@pinecone-database/pinecone';
@@ -44,7 +43,7 @@ async function processArticle(url: string): Promise<Article> {
     const title = $('h1').first().text().trim();
     const content = $('p').map((_, el) => $(el).text().trim()).get().join('\n\n');
 
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-pro" });
+    const model = genAI.getGenerativeModel({ model: "gemini-2.5-pro-exp-03-25" });
     const prompt = `Extract JSON from this article:\nTitle: ${title}\nContent: ${content.substring(0, 10000)}\n\nOutput format: {
       "title": "string",
       "content": "string",
@@ -98,13 +97,19 @@ const agentHandler = async (req: Request<{}, {}, RequestBody>, res: Response, ne
       return res.status(400).json({ error: 'Query is required and must be a string' });
     }
 
+    console.log(`Processing query: ${query}`);
+
+    // Check if query contains a URL
     const url = extractUrlFromQuery(query);
     if (url) {
       const article = await processArticle(url);
-      const model = genAI.getGenerativeModel({ model: "gemini-1.5-pro" });
-      const { response } = await model.generateContent(
-        `Summarize this article in 3-4 sentences:\n\n${article.content}`
-      );
+      const model = genAI.getGenerativeModel({ model: "gemini-2.5-pro-exp-03-25" });
+      const { response } = await model.generateContent({
+        contents: [{
+          role: "user",
+          parts: [{ text: `Summarize this article: ${article.content.substring(0, 10000)}` }]
+        }]
+      });
 
       return res.json({
         answer: response.text(),
@@ -116,18 +121,17 @@ const agentHandler = async (req: Request<{}, {}, RequestBody>, res: Response, ne
       });
     }
 
+    // Regular query processing
     const relevantArticles = await searchArticles(query);
-    const context = relevantArticles.map(a =>
+    const context = relevantArticles.map(a => 
       `Title: ${a.title}\nContent: ${a.content.substring(0, 1000)}`
     ).join('\n\n');
 
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-pro" });
+    const model = genAI.getGenerativeModel({ model: "gemini-2.5-pro-exp-03-25" });
     const { response } = await model.generateContent({
       contents: [{
         role: "user",
-        parts: [{
-          text: `Answer this query: ${query}\n\nContext:\n${context}\n\nBe concise and cite sources.`
-        }]
+        parts: [{ text: `Answer this query: ${query}\n\nContext:\n${context}\n\nBe concise and cite sources.` }]
       }]
     });
 
